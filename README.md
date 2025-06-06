@@ -184,39 +184,37 @@ Create the [application](https://portal.azure.com/#view/Microsoft_AAD_Registered
 
 1. Register an application in [Azure Portal](https://portal.azure.com/):
 
-1. Go to **Azure Active Directory** > **App registrations** > **New registration**.
-1. Enter a name for your app.
-1. Set **Supported account types** as needed (e.g., "Accounts in any organizational directory and personal Microsoft accounts").
-1. In **Redirect URI**, select "Web" and enter: `http://localhost:3000/api/auth/callback/microsoft-entra-id`
-1. Click **Register**.
+   1. Go to **Azure Active Directory** > **App registrations** > **New registration**.
+   2. Enter a name for your app.
+   3. Set **Supported account types** as needed (e.g., "Accounts in any organizational directory and personal Microsoft accounts").
+   4. In **Redirect URI**, select "Web" and enter: `http://localhost:3000/api/auth/callback/microsoft-entra-id`
+   5. Click **Register**.
 
-1. Configure authentication:
+2. Configure authentication:
 
-1. In your app registration, go to **Authentication**.
-1. Ensure the redirect URI `http://localhost:3000/api/auth/callback/microsoft-entra-id` is listed.
-1. (Optional) Enable **Access tokens** and **ID tokens**.
+   1. In your app registration, go to **Authentication**.
+   2. Ensure the redirect URI `http://localhost:3000/api/auth/callback/microsoft-entra-id` is listed.
+   3. (Optional) Enable **Access tokens** and **ID tokens**.
 
-1. Create a client secret:
+3. Create a client secret:
 
-1. Go to **Certificates & secrets** > **New client secret**.
-1. Add a description and set an expiry.
-1. Click **Add** and copy the generated value (you won't see it again).
+   1. Go to **Certificates & secrets** > **New client secret**.
+   2. Add a description and set an expiry.
+   3. Click **Add** and copy the generated value (you won't see it again).
 
-1. Update your `.env` file:
+4. Update your `.env` file:
 
 - Set `MICROSOFT_CLIENT_ID` to the **Application (client) ID** from the app registration overview.
 - Set `MICROSOFT_CLIENT_SECRET` to the value of the client secret you just created.
 - Set `MICROSOFT_ISSUER` to your **Directory (tenant) ID** or use `https://login.microsoftonline.com/common/v2.0` for multi-tenant.
 
 5. Add API permissions:
-
-1. Go to **API permissions** > **Add a permission**.
-1. Choose **Microsoft Graph** > **Delegated permissions**.
-1. Add permissions such as `User.Read`, `Mail.ReadWrite`, `Mail.Send`, `offline_access`, and any others your app requires.
-1. Click **Add permissions**.
-1. (If needed) Click **Grant admin consent**.
-
-1. (Optional) Add yourself as a test user:
+   1. Go to **API permissions** > **Add a permission**.
+   2. Choose **Microsoft Graph** > **Delegated permissions**.
+   3. Add permissions such as `User.Read`, `Mail.ReadWrite`, `Mail.Send`, `offline_access`, and any others your app requires.
+   4. Click **Add permissions**.
+   5. (If needed) Click **Grant admin consent**.
+   6. (Optional) Add yourself as a test user:
 
 - If your app is restricted, ensure your Microsoft account is added as a user in the Azure AD tenant.
 
