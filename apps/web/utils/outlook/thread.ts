@@ -171,3 +171,51 @@ export async function getThreadMessages(
     .map((m) => parseMessage(m as MessageWithPayload))
     .filter((m) => !m.labelIds?.includes(GmailLabel.DRAFT));
 }
+
+interface GetOutlookThreadParams {
+  id: string;
+  includeDrafts?: boolean;
+  graphClient: any;
+  emailAccountId: string;
+}
+
+export async function getOutlookThread({
+  id,
+  includeDrafts = false,
+  graphClient,
+}: GetOutlookThreadParams) {
+  // Fetch the conversation (thread) by ID
+  const conversation = await graphClient.api(`/me/conversations/${id}`).get();
+
+  // Fetch all threads (message groups) in the conversation
+  const threadsRes = await graphClient
+    .api(`/me/conversations/${id}/threads`)
+    .expand("posts")
+    .get();
+
+  // Each thread contains messages (posts)
+  const threads = threadsRes.value || [];
+
+  // Flatten all messages in all threads
+  let messages: any[] = [];
+  for (const thread of threads) {
+    if (Array.isArray(thread.posts)) {
+      messages = messages.concat(thread.posts);
+    }
+  }
+
+  // Optionally filter out drafts
+  if (!includeDrafts) {
+    messages = messages.filter(
+      (msg) => msg.isDraft !== true, // isDraft is not always present; adjust as needed
+    );
+  }
+
+  return {
+    id: conversation.id,
+    topic: conversation.topic,
+    messages,
+    snippet: messages[0]?.bodyPreview || "",
+    conversation,
+  };
+}

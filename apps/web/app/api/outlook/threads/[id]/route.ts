@@ -1,10 +1,8 @@
 import { z } from "zod";
-import { Client } from "@microsoft/microsoft-graph-client";
 import { NextResponse } from "next/server";
-import { parseMessages } from "@/utils/mail";
-import { getGmailClientForEmail } from "@/utils/account";
 import { withEmailAccount } from "@/utils/middleware";
-import { getThread as getOutlookThread } from "@/utils/outlook/thread";
+import { getGraphClientAndAccessTokenForEmail } from "@/utils/account";
+import { getOutlookThread } from "@/utils/outlook/thread";
 
 export const dynamic = "force-dynamic";
 
@@ -15,16 +13,18 @@ export type ThreadResponse = Awaited<ReturnType<typeof getThread>>;
 async function getThread(
   id: string,
   includeDrafts: boolean,
-  gmail: gmail_v1.Gmail,
+  graphClient: any,
+  emailAccountId: string,
 ) {
-  const thread = await getGmailThread(id, gmail);
-
-  const messages = parseMessages(thread, {
-    withoutIgnoredSenders: true,
-    withoutDrafts: !includeDrafts,
+  // Fetch the conversation and its messages from Microsoft Graph
+  const thread = await getOutlookThread({
+    id,
+    includeDrafts,
+    graphClient,
+    emailAccountId,
   });
 
-  return { thread: { ...thread, messages } };
+  return { thread };
 }
 
 export const GET = withEmailAccount(async (request, context) => {
@@ -33,12 +33,19 @@ export const GET = withEmailAccount(async (request, context) => {
   const params = await context.params;
   const { id } = threadQuery.parse(params);
 
-  const gmail = await getGmailClientForEmail({ emailAccountId });
+  const { graphClient } = await getGraphClientAndAccessTokenForEmail({
+    emailAccountId,
+  });
 
   const { searchParams } = new URL(request.url);
   const includeDrafts = searchParams.get("includeDrafts") === "true";
 
-  const thread = await getThread(id, includeDrafts, gmail);
+  const thread = await getThread(
+    id,
+    includeDrafts,
+    graphClient,
+    emailAccountId,
+  );
 
   return NextResponse.json(thread);
 });

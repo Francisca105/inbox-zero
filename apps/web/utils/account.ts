@@ -6,6 +6,7 @@ import {
 import { redirect } from "next/navigation";
 import prisma from "@/utils/prisma";
 import { notFound } from "next/navigation";
+import { Client } from "@microsoft/microsoft-graph-client";
 
 export async function getGmailClientForEmail({
   emailAccountId,
@@ -146,4 +147,29 @@ export async function getOutlookClientForEmailId({
     emailAccountId,
   });
   return outlook;
+}
+
+export async function getGraphClientAndAccessTokenForEmail({
+  emailAccountId,
+}: {
+  emailAccountId: string;
+}) {
+  const tokens = await getTokens({ emailAccountId });
+
+  if (!tokens.accessToken) {
+    throw new Error("No access token found for this account");
+  }
+
+  // Create Microsoft Graph client
+  const graphClient = Client.init({
+    authProvider: (done) => {
+      done(null, tokens.accessToken as string);
+    },
+  });
+
+  return {
+    graphClient,
+    accessToken: tokens.accessToken,
+    tokens,
+  };
 }

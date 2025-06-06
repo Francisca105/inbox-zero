@@ -1,30 +1,17 @@
 import { z } from "zod";
-import type { gmail_v1 } from "@googleapis/gmail";
-import MailComposer from "nodemailer/lib/mail-composer";
-import type Mail from "nodemailer/lib/mailer";
-import type { Attachment } from "nodemailer/lib/mailer";
+import type { Attachment as NodemailerAttachment } from "nodemailer/lib/mailer";
 import { zodAttachment } from "@/utils/types/mail";
-import { convertEmailHtmlToText, parseMessage } from "@/utils/mail";
-import { getMessage } from "@/utils/gmail/message";
-import {
-  forwardEmailHtml,
-  forwardEmailSubject,
-  forwardEmailText,
-} from "@/utils/gmail/forward";
-import type { ParsedMessage } from "@/utils/types";
-import { createReplyContent } from "@/utils/gmail/reply";
-import type { EmailForAction } from "@/utils/ai/types";
+import { convertEmailHtmlToText } from "@/utils/mail";
 import { createScopedLogger } from "@/utils/logger";
-import { withGmailRetry } from "@/utils/gmail/retry";
 
-const logger = createScopedLogger("gmail/mail");
+const logger = createScopedLogger("outlook/mail");
 
 export const sendEmailBody = z.object({
   replyToEmail: z
     .object({
       threadId: z.string(),
-      headerMessageId: z.string(), // this is different to the gmail message id and looks something like <123...abc@mail.example.com>
-      references: z.string().optional(), // for threading
+      headerMessageId: z.string(),
+      references: z.string().optional(),
     })
     .optional(),
   to: z.string(),
@@ -37,69 +24,26 @@ export const sendEmailBody = z.object({
 });
 export type SendEmailBody = z.infer<typeof sendEmailBody>;
 
-const encodeMessage = (message: Buffer) => {
-  return Buffer.from(message)
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
-};
+/**
+ * Converts nodemailer-style attachments to Microsoft Graph format.
+ */
+function toGraphAttachments(attachments?: NodemailerAttachment[]) {
+  if (!attachments) return [];
+  return attachments.map((a) => ({
+    "@odata.type": "#microsoft.graph.fileAttachment",
+    name: a.filename,
+    contentType: a.contentType,
+    contentBytes: a.content?.toString("base64"),
+  }));
+}
 
-const createMail = async (options: Mail.Options) => {
-  const mailComposer = new MailComposer(options);
-  const message = await mailComposer.compile().build();
-  return encodeMessage(message);
-};
-
-const createRawMailMessage = async (
-  {
-    to,
-    cc,
-    bcc,
-    subject,
-    messageHtml,
-    messageText,
-    attachments,
-    replyToEmail,
-  }: Omit<SendEmailBody, "attachments"> & {
-    attachments?: Attachment[];
-    messageText: string;
-  },
-  from?: string,
-) => {
-  return await createMail({
-    from,
-    to,
-    cc,
-    bcc,
-    subject,
-    alternatives: [
-      {
-        contentType: "text/plain; charset=UTF-8",
-        content: messageText,
-      },
-      {
-        contentType: "text/html; charset=UTF-8",
-        content: messageHtml,
-      },
-    ],
-    attachments,
-    // https://datatracker.ietf.org/doc/html/rfc2822#appendix-A.2
-    references: replyToEmail
-      ? `${replyToEmail.references || ""} ${replyToEmail.headerMessageId}`.trim()
-      : "",
-    inReplyTo: replyToEmail ? replyToEmail.headerMessageId : "",
-    headers: {
-      "X-Mailer": "Inbox Zero Web",
-    },
-  });
-};
-
-// https://developers.google.com/gmail/api/guides/sending
-// https://www.labnol.org/google-api-service-account-220405
-export async function sendEmailWithHtml(
-  gmail: gmail_v1.Gmail,
+/**
+ * Send an email with HTML content using Microsoft Graph.
+ */
+export async function sendEmailWithHtmlGraph(
+  graphClient: any,
   body: SendEmailBody,
+  from?: string,
 ) {
   let messageText: string;
 
@@ -107,200 +51,43 @@ export async function sendEmailWithHtml(
     messageText = convertEmailHtmlToText({ htmlText: body.messageHtml });
   } catch (error) {
     logger.error("Error converting email html to text", { error });
-    // Strip HTML tags as a fallback
     messageText = body.messageHtml.replace(/<[^>]*>/g, "");
   }
 
-  const raw = await createRawMailMessage({ ...body, messageText });
-  const result = await gmail.users.messages.send({
-    userId: "me",
-    requestBody: {
-      threadId: body.replyToEmail ? body.replyToEmail.threadId : undefined,
-      raw,
+  const message: any = {
+    subject: body.subject,
+    body: {
+      contentType: "HTML",
+      content: body.messageHtml,
     },
-  });
-  return result;
-}
+    toRecipients: body.to
+      .split(",")
+      .map((email) => ({ emailAddress: { address: email.trim() } })),
+    ccRecipients: body.cc
+      ? body.cc
+          .split(",")
+          .map((email) => ({ emailAddress: { address: email.trim() } }))
+      : [],
+    bccRecipients: body.bcc
+      ? body.bcc
+          .split(",")
+          .map((email) => ({ emailAddress: { address: email.trim() } }))
+      : [],
+    attachments: toGraphAttachments(body.attachments),
+  };
 
-export async function sendEmailWithPlainText(
-  gmail: gmail_v1.Gmail,
-  body: Omit<SendEmailBody, "messageHtml"> & { messageText: string },
-) {
-  const messageHtml = convertTextToHtmlParagraphs(body.messageText);
-  return sendEmailWithHtml(gmail, { ...body, messageHtml });
-}
+  if (body.replyTo) {
+    message.replyTo = [{ emailAddress: { address: body.replyTo } }];
+  }
 
-export async function replyToEmail(
-  gmail: gmail_v1.Gmail,
-  message: Pick<
-    ParsedMessage,
-    "threadId" | "headers" | "textPlain" | "textHtml"
-  >,
-  reply: string,
-  from?: string,
-) {
-  const { text, html } = createReplyContent({
-    textContent: reply,
-    message,
-  });
+  // Optionally set "from" if sending as another user (requires permissions)
+  if (from) {
+    message.from = { emailAddress: { address: from } };
+  }
 
-  const raw = await createRawMailMessage(
-    {
-      to: message.headers["reply-to"] || message.headers.from,
-      subject: message.headers.subject,
-      messageText: text,
-      messageHtml: html,
-      replyToEmail: {
-        threadId: message.threadId,
-        headerMessageId: message.headers["message-id"] || "",
-        references: message.headers.references,
-      },
-    },
-    from,
-  );
-
-  const result = await gmail.users.messages.send({
-    userId: "me",
-    requestBody: {
-      threadId: message.threadId,
-      raw,
-    },
-  });
-
-  return result;
-}
-
-export async function forwardEmail(
-  gmail: gmail_v1.Gmail,
-  options: {
-    messageId: string;
-    to: string;
-    cc?: string;
-    bcc?: string;
-    content?: string;
-  },
-) {
-  if (!options.to.trim()) throw new Error("Recipient address is required");
-
-  const m = await getMessage(options.messageId, gmail);
-
-  const messageId = m.id;
-  if (!messageId) throw new Error("Message not found");
-
-  const message = parseMessage(m);
-
-  const attachments = await Promise.all(
-    message.attachments?.map(async (attachment) => {
-      const attachmentData = await gmail.users.messages.attachments.get({
-        userId: "me",
-        messageId,
-        id: attachment.attachmentId,
-      });
-      return {
-        content: Buffer.from(attachmentData.data.data || "", "base64"),
-        contentType: attachment.mimeType,
-        filename: attachment.filename,
-      };
-    }) || [],
-  );
-
-  const raw = await createRawMailMessage({
-    to: options.to,
-    cc: options.cc,
-    bcc: options.bcc,
-    subject: forwardEmailSubject(message.headers.subject),
-    messageText: forwardEmailText({ content: options.content ?? "", message }),
-    messageHtml: forwardEmailHtml({ content: options.content ?? "", message }),
-    replyToEmail: {
-      threadId: message.threadId || "",
-      references: "",
-      headerMessageId: "",
-    },
-    attachments,
-  });
-
-  const result = await gmail.users.messages.send({
-    userId: "me",
-    requestBody: {
-      threadId: message.threadId,
-      raw,
-    },
-  });
-
-  return result;
-}
-
-// Handles both replies and regular drafts. May want to split that out into two functions
-export async function draftEmail(
-  gmail: gmail_v1.Gmail,
-  originalEmail: EmailForAction,
-  args: {
-    to?: string;
-    subject?: string;
-    content: string;
-    attachments?: Attachment[];
-  },
-) {
-  const { text, html } = createReplyContent({
-    textContent: args.content,
-    message: originalEmail,
-  });
-
-  const raw = await createRawMailMessage({
-    to:
-      args.to ||
-      originalEmail.headers["reply-to"] ||
-      originalEmail.headers.from,
-    cc: originalEmail.headers.cc,
-    bcc: originalEmail.headers.bcc,
-    subject: args.subject || originalEmail.headers.subject,
-    messageHtml: html,
-    messageText: text,
-    attachments: args.attachments,
-    replyToEmail: {
-      threadId: originalEmail.threadId,
-      headerMessageId: originalEmail.headers["message-id"] || "",
-      references: originalEmail.headers.references,
-    },
-  });
-
-  const result = await createDraft(gmail, originalEmail.threadId, raw);
-
-  return result;
-}
-
-async function createDraft(
-  gmail: gmail_v1.Gmail,
-  threadId: string,
-  raw: string,
-) {
-  const result = await withGmailRetry(async () =>
-    gmail.users.drafts.create({
-      userId: "me",
-      requestBody: {
-        message: {
-          threadId,
-          raw,
-        },
-      },
-    }),
-  );
-
-  return result;
-}
-
-function convertTextToHtmlParagraphs(text?: string | null): string {
-  if (!text) return "";
-
-  // Split the text into paragraphs based on newline characters
-  const paragraphs = text
-    .split("\n")
-    .filter((paragraph) => paragraph.trim() !== "");
-
-  // Wrap each paragraph with <p> tags and join them back together
-  const htmlContent = paragraphs
-    .map((paragraph) => `<p>${paragraph.trim()}</p>`)
-    .join("");
-
-  return `<html><body>${htmlContent}</body></html>`;
+  // Send the message
+  await graphClient
+    .api("/me/sendMail")
+    .post({ message, saveToSentItems: true });
+  return { success: true };
 }
