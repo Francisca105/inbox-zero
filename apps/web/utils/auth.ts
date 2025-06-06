@@ -4,15 +4,13 @@ import type { Prisma } from "@prisma/client";
 import type { NextAuthConfig, DefaultSession } from "next-auth";
 import type { JWT } from "@auth/core/jwt";
 import GoogleProvider from "next-auth/providers/google";
-import MicrosoftProvider from "next-auth/providers/microsoft-entra-id";
 import { createContact as createLoopsContact } from "@inboxzero/loops";
 import { createContact as createResendContact } from "@inboxzero/resend";
 import prisma from "@/utils/prisma";
 import { env } from "@/env";
 import { captureException } from "@/utils/error";
 import { createScopedLogger } from "@/utils/logger";
-import { SCOPES as GOOGLE_SCOPES } from "@/utils/gmail/scopes";
-import { SCOPES as MICROSOFT_SCOPES } from "@/utils/outlook/scopes";
+import { SCOPES } from "@/utils/gmail/scopes";
 import { getContactsClient } from "@/utils/gmail/client";
 import { encryptToken } from "@/utils/encryption";
 import { updateAccountSeats } from "@/utils/premium/server";
@@ -30,7 +28,7 @@ export const getAuthOptions: (options?: {
       authorization: {
         url: "https://accounts.google.com/o/oauth2/v2/auth",
         params: {
-          scope: GOOGLE_SCOPES.join(" "),
+          scope: SCOPES.join(" "),
           access_type: "offline",
           response_type: "code",
           prompt: "consent",
@@ -39,17 +37,6 @@ export const getAuthOptions: (options?: {
           // refresh token is only provided on first sign up unless we pass prompt=consent
           // https://github.com/nextauthjs/next-auth/issues/269#issuecomment-644274504
           // ...(options?.consent ? { prompt: "consent" } : {}),
-        },
-      },
-    }),
-    MicrosoftProvider({
-      clientId: env.MICROSOFT_CLIENT_ID,
-      clientSecret: env.MICROSOFT_CLIENT_SECRET,
-      issuer: `https://login.microsoftonline.com/${env.MICROSOFT_ISSUER}/v2.0`,
-      authorization: {
-        // https://learn.microsoft.com/en-us/graph/permissions-overview
-        params: {
-          scope: MICROSOFT_SCOPES.join(" "),
         },
       },
     }),
@@ -82,78 +69,44 @@ export const getAuthOptions: (options?: {
       try {
         // --- Step 1: Fetch Profile Info using Access Token ---
         if (data.access_token) {
-          if (data.provider === "google") {
-            const contactsClient = getContactsClient({
-              accessToken: data.access_token,
+          const contactsClient = getContactsClient({
+            accessToken: data.access_token,
+          });
+          try {
+            const profileResponse = await contactsClient.people.get({
+              resourceName: "people/me",
+              personFields: "emailAddresses,names,photos",
             });
-            try {
-              const profileResponse = await contactsClient.people.get({
-                resourceName: "people/me",
-                personFields: "emailAddresses,names,photos",
-              });
 
-              primaryEmail = profileResponse.data.emailAddresses
-                ?.find((e) => e.metadata?.primary)
-                ?.value?.toLowerCase();
-              primaryName = profileResponse.data.names?.find(
-                (n) => n.metadata?.primary,
-              )?.displayName;
-              primaryPhotoUrl = profileResponse.data.photos?.find(
-                (p) => p.metadata?.primary,
-              )?.url;
-            } catch (profileError) {
-              logger.error(
-                "[linkAccount] Error fetching Google profile info:",
-                {
-                  profileError,
-                },
-              );
-              throw new Error("Failed to fetch Google profile info.");
-            }
-          } else if (data.provider === "microsoft-entra-id") {
-            // Use Microsoft Graph API to fetch profile
-            try {
-              const response = await fetch(
-                "https://graph.microsoft.com/v1.0/me",
-                {
-                  headers: {
-                    Authorization: `Bearer ${data.access_token}`,
-                  },
-                },
-              );
-              const profile = await response.json();
-              if (!response.ok)
-                throw new Error("Failed to fetch Microsoft profile");
-
-              primaryEmail =
-                profile.mail?.toLowerCase() ||
-                profile.userPrincipalName?.toLowerCase();
-              primaryName = profile.displayName;
-              primaryPhotoUrl = profile.photo
-                ? `https://graph.microsoft.com/v1.0/me/photo/$value`
-                : null;
-            } catch (profileError) {
-              logger.error(
-                "[linkAccount] Error fetching Microsoft profile info:",
-                {
-                  profileError,
-                },
-              );
-              throw new Error("Failed to fetch Microsoft profile info.");
-            }
-          } else {
-            logger.error("[linkAccount] Unsupported provider:", {
-              provider: data.provider,
+            primaryEmail = profileResponse.data.emailAddresses
+              ?.find((e) => e.metadata?.primary)
+              ?.value?.toLowerCase();
+            primaryName = profileResponse.data.names?.find(
+              (n) => n.metadata?.primary,
+            )?.displayName;
+            primaryPhotoUrl = profileResponse.data.photos?.find(
+              (p) => p.metadata?.primary,
+            )?.url;
+          } catch (profileError) {
+            logger.error("[linkAccount] Error fetching profile info:", {
+              profileError,
             });
-            throw new Error("Unsupported provider.");
+            // Decide if this is fatal. Probably should be.
+            throw new Error(
+              "Failed to fetch profile info for linking account.",
+            );
           }
         } else {
-          logger.error("[linkAccount] No access_token found in data.");
+          logger.error(
+            "[linkAccount] No access_token found in data, cannot fetch profile.",
+          );
           throw new Error("Missing access token during account linking.");
         }
 
         if (!primaryEmail) {
-          logger.error("[linkAccount] Primary email could not be determined.");
+          logger.error(
+            "[linkAccount] Primary email could not be determined from profile.",
+          );
           throw new Error("Primary email not found for linked account.");
         }
 
@@ -222,7 +175,6 @@ export const getAuthOptions: (options?: {
               expires_at: calculateExpiresAt(
                 account.expires_in as number | undefined,
               ),
-              provider: account.provider,
             },
             accountRefreshToken: account.refresh_token,
             providerAccountId: account.providerAccountId,
@@ -233,7 +185,7 @@ export const getAuthOptions: (options?: {
             where: {
               provider_providerAccountId: {
                 providerAccountId: account.providerAccountId,
-                provider: account.provider, // Suport for multiple providers; e.g. google, microsoft-entra-id
+                provider: "google",
               },
             },
             select: { refresh_token: true },
@@ -358,15 +310,11 @@ export const authOptions = getAuthOptions();
  */
 const refreshAccessToken = async (token: JWT): Promise<JWT> => {
   const account = await prisma.account.findFirst({
-    where: {
-      userId: token.sub as string,
-      provider: token.provider || "google",
-    },
+    where: { userId: token.sub as string, provider: "google" },
     select: {
       userId: true,
       refresh_token: true,
       providerAccountId: true,
-      provider: true,
     },
   });
 
@@ -390,41 +338,21 @@ const refreshAccessToken = async (token: JWT): Promise<JWT> => {
   logger.info("Refreshing access token", { email: token.email });
 
   try {
-    let response;
-    if (account.provider === "google") {
-      response = await fetch("https://oauth2.googleapis.com/token", {
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({
-          client_id: env.GOOGLE_CLIENT_ID,
-          client_secret: env.GOOGLE_CLIENT_SECRET,
-          grant_type: "refresh_token",
-          refresh_token: account.refresh_token,
-        }),
-        method: "POST",
-      });
-    } else if (account.provider === "microsoft-entra-id") {
-      response = await fetch(
-        `https://login.microsoftonline.com/${env.MICROSOFT_ISSUER}/oauth2/v2.0/token`,
-        {
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: new URLSearchParams({
-            client_id: env.MICROSOFT_CLIENT_ID,
-            client_secret: env.MICROSOFT_CLIENT_SECRET,
-            grant_type: "refresh_token",
-            refresh_token: account.refresh_token,
-            scope: MICROSOFT_SCOPES.join(" "),
-          }),
-          method: "POST",
-        },
-      );
-    } else {
-      throw new Error("Unsupported provider for token refresh");
-    }
+    const response = await fetch("https://oauth2.googleapis.com/token", {
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        client_id: env.GOOGLE_CLIENT_ID,
+        client_secret: env.GOOGLE_CLIENT_SECRET,
+        grant_type: "refresh_token",
+        refresh_token: account.refresh_token,
+      }),
+      method: "POST",
+    });
 
     const tokens: {
       expires_in: number;
       access_token: string;
-      refresh_token?: string;
+      refresh_token: string;
     } = await response.json();
 
     if (!response.ok) throw tokens;
@@ -481,7 +409,6 @@ export async function saveTokens({
     access_token?: string;
     refresh_token?: string;
     expires_at?: number;
-    provider?: string; // e.g. google, microsoft-entra-id
   };
   accountRefreshToken: string | null;
 } & ( // provide one of these:
@@ -508,7 +435,6 @@ export async function saveTokens({
     access_token: tokens.access_token,
     expires_at: tokens.expires_at,
     refresh_token: refreshToken,
-    provider: tokens.provider || "google", // Default to google if not provided
   };
 
   if (emailAccountId) {
@@ -538,7 +464,7 @@ export async function saveTokens({
     return await prisma.account.update({
       where: {
         provider_providerAccountId: {
-          provider: data.provider || "google",
+          provider: "google",
           providerAccountId,
         },
       },
