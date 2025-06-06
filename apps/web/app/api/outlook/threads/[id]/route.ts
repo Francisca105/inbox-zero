@@ -16,7 +16,6 @@ async function getThread(
   graphClient: any,
   emailAccountId: string,
 ) {
-  // Fetch the conversation and its messages from Microsoft Graph
   const thread = await getOutlookThread({
     id,
     includeDrafts,
@@ -29,6 +28,12 @@ async function getThread(
 
 export const GET = withEmailAccount(async (request, context) => {
   const emailAccountId = request.auth.emailAccountId;
+  if (!emailAccountId) {
+    return NextResponse.json(
+      { error: "Email account not found" },
+      { status: 404 },
+    );
+  }
 
   const params = await context.params;
   const { id } = threadQuery.parse(params);
